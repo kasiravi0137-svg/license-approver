@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "793430610366",
+    "project_id": "myapp---license",
+    "storage_bucket": "myapp---license.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:793430610366:android:e07dd929ccc3294e48e9ef",
+        "android_client_info": {
+          "package_name": "com.kasisystem.licenseapprover"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDBrfP88_COVY3tjKnJWC7nBaWZM67BnB4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
