@@ -1,15 +1,37 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import 'firebase_options.dart';
+
+// --------------------------------------------------------------------
+// LICENSE APPROVER (with push notifications)
+//
+// 1. On startup, this app asks for notification permission, gets its
+//    FCM device token, and saves it to Firestore at
+//    device_tokens/approver so your Windows app (or whatever sends the
+//    notification) knows where to send it.
+// 2. Your Windows app creates a document in "activation_requests" with
+//    status "pending", then sends a push notification to that token.
+// 3. This app shows the notification even when closed. Tapping it (or
+//    just opening the app) shows the request with Approve/Reject.
+// --------------------------------------------------------------------
+
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  // Required top-level handler for background/terminated-state messages.
+  // Firebase shows the system notification automatically when the
+  // message has a "notification" payload; nothing else to do here.
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   runApp(const LicenseApproverApp());
 }
 
@@ -39,6 +61,34 @@ class RequestsPage extends StatefulWidget {
 
 class _RequestsPageState extends State<RequestsPage> {
   final _col = FirebaseFirestore.instance.collection('activation_requests');
+
+  @override
+  void initState() {
+    super.initState();
+    _setUpPushNotifications();
+  }
+
+  Future<void> _setUpPushNotifications() async {
+    final messaging = FirebaseMessaging.instance;
+
+    // Ask the person to allow notifications (Android 13+ needs this).
+    await messaging.requestPermission(alert: true, badge: true, sound: true);
+
+    Future<void> saveToken(String? token) async {
+      if (token == null) return;
+      await FirebaseFirestore.instance
+          .collection('device_tokens')
+          .doc('approver')
+          .set({
+        'token': token,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    // Save the token now, and again whenever it changes.
+    await saveToken(await messaging.getToken());
+    messaging.onTokenRefresh.listen(saveToken);
+  }
 
   @override
   Widget build(BuildContext context) {
