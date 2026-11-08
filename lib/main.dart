@@ -7,7 +7,7 @@ import 'package:intl/intl.dart';
 import 'firebase_options.dart';
 
 // --------------------------------------------------------------------
-// LICENSE APPROVER (with push notifications)
+// LICENSE APPROVER (with push notifications, nicknames and revoke)
 //
 // 1. On startup, this app asks for notification permission, gets its
 //    FCM device token, and saves it to Firestore at
@@ -17,6 +17,9 @@ import 'firebase_options.dart';
 //    status "pending", then sends a push notification to that token.
 // 3. This app shows the notification even when closed. Tapping it (or
 //    just opening the app) shows the request with Approve/Reject.
+// 4. Approved devices can be given a nickname and revoked later --
+//    revoking sets status back to "rejected", which the Windows app's
+//    background watchdog picks up within a couple of minutes.
 // --------------------------------------------------------------------
 
 @pragma('vm:entry-point')
@@ -70,8 +73,6 @@ class _RequestsPageState extends State<RequestsPage> {
 
   Future<void> _setUpPushNotifications() async {
     final messaging = FirebaseMessaging.instance;
-
-    // Ask the person to allow notifications (Android 13+ needs this).
     await messaging.requestPermission(alert: true, badge: true, sound: true);
 
     Future<void> saveToken(String? token) async {
@@ -85,7 +86,6 @@ class _RequestsPageState extends State<RequestsPage> {
       });
     }
 
-    // Save the token now, and again whenever it changes.
     await saveToken(await messaging.getToken());
     messaging.onTokenRefresh.listen(saveToken);
   }
@@ -154,12 +154,67 @@ class RequestCard extends StatelessWidget {
     }
   }
 
+  Future<void> _rename(BuildContext context) async {
+    final controller = TextEditingController(text: (data['nickname'] ?? '') as String);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Device nickname'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'e.g. Office PC'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null) return;
+    final col = FirebaseFirestore.instance.collection('activation_requests');
+    await col.doc(docId).update({'nickname': newName});
+  }
+
+  Future<void> _revoke(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Revoke access?'),
+        content: Text(
+          'This will lock out "${(data['nickname'] ?? '') as String != '' ? data['nickname'] : 'this device'}". '
+          'It will stop working within a couple of minutes.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Revoke'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final col = FirebaseFirestore.instance.collection('activation_requests');
+    await col.doc(docId).update({
+      'status': 'rejected',
+      'decidedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = (data['status'] ?? 'pending') as String;
     final machineId = (data['machineId'] ?? 'unknown') as String;
     final appName = (data['appName'] ?? 'Unknown app') as String;
-    final userLabel = (data['userLabel'] ?? '') as String;
+    final nickname = (data['nickname'] ?? '') as String;
     final ts = data['createdAt'];
     String whenText = '';
     if (ts is Timestamp) {
@@ -180,9 +235,13 @@ class RequestCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    appName,
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w600),
+                    nickname.isNotEmpty ? nickname : 'Unnamed device',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      fontStyle: nickname.isNotEmpty ? FontStyle.normal : FontStyle.italic,
+                      color: nickname.isNotEmpty ? null : Colors.grey,
+                    ),
                   ),
                 ),
                 Container(
@@ -203,16 +262,14 @@ class RequestCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
+            Text(appName, style: Theme.of(context).textTheme.bodySmall),
             Text('Machine ID: $machineId',
                 style: Theme.of(context).textTheme.bodySmall),
-            if (userLabel.isNotEmpty)
-              Text('From: $userLabel',
-                  style: Theme.of(context).textTheme.bodySmall),
             if (whenText.isNotEmpty)
               Text(whenText, style: Theme.of(context).textTheme.bodySmall),
-            if (status == 'pending') ...[
-              const SizedBox(height: 10),
+            const SizedBox(height: 10),
+            if (status == 'pending')
               Row(
                 children: [
                   Expanded(
@@ -235,8 +292,30 @@ class RequestCard extends StatelessWidget {
                     ),
                   ),
                 ],
+              )
+            else if (status == 'approved')
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _rename(context),
+                      icon: const Icon(Icons.edit, size: 16),
+                      label: const Text('Rename'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.red,
+                        side: const BorderSide(color: Colors.red),
+                      ),
+                      onPressed: () => _revoke(context),
+                      child: const Text('Revoke'),
+                    ),
+                  ),
+                ],
               ),
-            ],
           ],
         ),
       ),
