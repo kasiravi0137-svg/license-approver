@@ -182,6 +182,27 @@ class RequestCard extends StatelessWidget {
     await col.doc(docId).update({'nickname': newName});
   }
 
+  Future<void> _delete(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this request?'),
+        content: const Text('This removes it from the list permanently. This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final col = FirebaseFirestore.instance.collection('activation_requests');
+    await col.doc(docId).delete();
+  }
+
   Future<void> _revoke(BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -315,6 +336,19 @@ class RequestCard extends StatelessWidget {
                     ),
                   ),
                 ],
+              )
+            else if (status == 'rejected')
+              Align(
+                alignment: Alignment.centerRight,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.red,
+                    side: const BorderSide(color: Colors.red),
+                  ),
+                  onPressed: () => _delete(context),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: const Text('Delete'),
+                ),
               ),
           ],
         ),
