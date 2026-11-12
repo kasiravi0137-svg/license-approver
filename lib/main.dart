@@ -7,7 +7,8 @@ import 'package:intl/intl.dart';
 import 'firebase_options.dart';
 
 // --------------------------------------------------------------------
-// LICENSE APPROVER (with push notifications, nicknames and revoke)
+// LICENSE APPROVER (with push notifications, nicknames, revoke, delete
+// and an access-level choice)
 //
 // 1. On startup, this app asks for notification permission, gets its
 //    FCM device token, and saves it to Firestore at
@@ -17,10 +18,19 @@ import 'firebase_options.dart';
 //    status "pending", then sends a push notification to that token.
 // 3. This app shows the notification even when closed. Tapping it (or
 //    just opening the app) shows the request with Approve/Reject.
-// 4. Approved devices can be given a nickname and revoked later --
-//    revoking sets status back to "rejected", which the Windows app's
-//    background watchdog picks up within a couple of minutes.
+// 4. Before approving, you choose an access level for that device --
+//    "Scripts only" or "With data check" -- saved as accessLevel on
+//    the same document. You can change it later from an approved card.
+// 5. Approved devices can be given a nickname, revoked, or deleted
+//    (once rejected) -- revoking sets status back to "rejected", which
+//    the Windows app's background watchdog picks up within seconds.
 // --------------------------------------------------------------------
+
+const String kScriptsOnly = 'scripts_only';
+const String kWithData = 'with_data';
+
+String accessLabel(String? level) =>
+    level == kWithData ? 'With data check' : 'Scripts only';
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -126,11 +136,31 @@ class _RequestsPageState extends State<RequestsPage> {
   }
 }
 
-class RequestCard extends StatelessWidget {
+class RequestCard extends StatefulWidget {
   final String docId;
   final Map<String, dynamic> data;
 
   const RequestCard({super.key, required this.docId, required this.data});
+
+  @override
+  State<RequestCard> createState() => _RequestCardState();
+}
+
+class _RequestCardState extends State<RequestCard> {
+  // Which access level is selected in the picker before approving a
+  // pending request. Defaults to the safer "Scripts only".
+  late String _pendingChoice;
+
+  @override
+  void initState() {
+    super.initState();
+    _pendingChoice = (widget.data['accessLevel'] as String?) ?? kScriptsOnly;
+  }
+
+  String get docId => widget.docId;
+  Map<String, dynamic> get data => widget.data;
+  CollectionReference<Map<String, dynamic>> get _col =>
+      FirebaseFirestore.instance.collection('activation_requests');
 
   String _statusLabel(String status) {
     switch (status) {
@@ -143,7 +173,7 @@ class RequestCard extends StatelessWidget {
     }
   }
 
-  Color _statusColor(String status, BuildContext context) {
+  Color _statusColor(String status) {
     switch (status) {
       case 'approved':
         return Colors.green;
@@ -152,6 +182,21 @@ class RequestCard extends StatelessWidget {
       default:
         return Colors.orange;
     }
+  }
+
+  Future<void> _approve() async {
+    await _col.doc(docId).update({
+      'status': 'approved',
+      'accessLevel': _pendingChoice,
+      'decidedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> _reject() async {
+    await _col.doc(docId).update({
+      'status': 'rejected',
+      'decidedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   Future<void> _rename(BuildContext context) async {
@@ -178,8 +223,72 @@ class RequestCard extends StatelessWidget {
       ),
     );
     if (newName == null) return;
-    final col = FirebaseFirestore.instance.collection('activation_requests');
-    await col.doc(docId).update({'nickname': newName});
+    await _col.doc(docId).update({'nickname': newName});
+  }
+
+  // Lets the admin change an already-approved device's access level
+  // later, without touching its status.
+  Future<void> _changeAccessLevel(BuildContext context) async {
+    var choice = (data['accessLevel'] as String?) ?? kScriptsOnly;
+    final saved = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Access level'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              RadioListTile<String>(
+                value: kScriptsOnly,
+                groupValue: choice,
+                title: const Text('Scripts only'),
+                subtitle: const Text('Compare & generate scripts. No data checking.'),
+                onChanged: (v) => setDialogState(() => choice = v!),
+              ),
+              RadioListTile<String>(
+                value: kWithData,
+                groupValue: choice,
+                title: const Text('With data check'),
+                subtitle: const Text('Also allowed to check/compare table data.'),
+                onChanged: (v) => setDialogState(() => choice = v!),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, choice), child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (saved == null) return;
+    await _col.doc(docId).update({'accessLevel': saved});
+  }
+
+  Future<void> _revoke(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Revoke access?'),
+        content: Text(
+          'This will lock out "${(data['nickname'] ?? '') as String != '' ? data['nickname'] : 'this device'}". '
+          'It will stop working within a few seconds.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Revoke'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _col.doc(docId).update({
+      'status': 'rejected',
+      'decidedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   Future<void> _delete(BuildContext context) async {
@@ -199,35 +308,7 @@ class RequestCard extends StatelessWidget {
       ),
     );
     if (confirmed != true) return;
-    final col = FirebaseFirestore.instance.collection('activation_requests');
-    await col.doc(docId).delete();
-  }
-
-  Future<void> _revoke(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Revoke access?'),
-        content: Text(
-          'This will lock out "${(data['nickname'] ?? '') as String != '' ? data['nickname'] : 'this device'}". '
-          'It will stop working within a couple of minutes.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Revoke'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    final col = FirebaseFirestore.instance.collection('activation_requests');
-    await col.doc(docId).update({
-      'status': 'rejected',
-      'decidedAt': FieldValue.serverTimestamp(),
-    });
+    await _col.doc(docId).delete();
   }
 
   @override
@@ -236,13 +317,12 @@ class RequestCard extends StatelessWidget {
     final machineId = (data['machineId'] ?? 'unknown') as String;
     final appName = (data['appName'] ?? 'Unknown app') as String;
     final nickname = (data['nickname'] ?? '') as String;
+    final accessLevel = data['accessLevel'] as String?;
     final ts = data['createdAt'];
     String whenText = '';
     if (ts is Timestamp) {
       whenText = DateFormat('dd MMM, hh:mm a').format(ts.toDate());
     }
-
-    final col = FirebaseFirestore.instance.collection('activation_requests');
 
     return Card(
       elevation: 1,
@@ -269,13 +349,13 @@ class RequestCard extends StatelessWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: _statusColor(status, context).withOpacity(0.12),
+                    color: _statusColor(status).withOpacity(0.12),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
                     _statusLabel(status),
                     style: TextStyle(
-                      color: _statusColor(status, context),
+                      color: _statusColor(status),
                       fontWeight: FontWeight.w600,
                       fontSize: 12,
                     ),
@@ -289,32 +369,78 @@ class RequestCard extends StatelessWidget {
                 style: Theme.of(context).textTheme.bodySmall),
             if (whenText.isNotEmpty)
               Text(whenText, style: Theme.of(context).textTheme.bodySmall),
-            const SizedBox(height: 10),
-            if (status == 'pending')
+
+            if (status == 'pending') ...[
+              const SizedBox(height: 12),
+              Text('Allow this device to',
+                  style: Theme.of(context).textTheme.labelSmall),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: _AccessChoiceTile(
+                      selected: _pendingChoice == kScriptsOnly,
+                      icon: Icons.description_outlined,
+                      label: 'Scripts only',
+                      desc: 'Compare & generate scripts.\nNo data checking.',
+                      onTap: () => setState(() => _pendingChoice = kScriptsOnly),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _AccessChoiceTile(
+                      selected: _pendingChoice == kWithData,
+                      icon: Icons.search,
+                      label: 'With data check',
+                      desc: 'Also allowed to check\n/compare table data.',
+                      onTap: () => setState(() => _pendingChoice = kWithData),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => col.doc(docId).update({
-                        'status': 'rejected',
-                        'decidedAt': FieldValue.serverTimestamp(),
-                      }),
+                      onPressed: _reject,
                       child: const Text('Reject'),
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: FilledButton(
-                      onPressed: () => col.doc(docId).update({
-                        'status': 'approved',
-                        'decidedAt': FieldValue.serverTimestamp(),
-                      }),
+                      onPressed: _approve,
                       child: const Text('Approve'),
                     ),
                   ),
                 ],
-              )
-            else if (status == 'approved')
+              ),
+            ] else if (status == 'approved') ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    const Text('Access level', style: TextStyle(fontSize: 13)),
+                    const Spacer(),
+                    Text(
+                      accessLabel(accessLevel),
+                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.edit, size: 16),
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _changeAccessLevel(context),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   Expanded(
@@ -336,8 +462,8 @@ class RequestCard extends StatelessWidget {
                     ),
                   ),
                 ],
-              )
-            else if (status == 'rejected')
+              ),
+            ] else if (status == 'rejected')
               Align(
                 alignment: Alignment.centerRight,
                 child: OutlinedButton.icon(
@@ -350,6 +476,56 @@ class RequestCard extends StatelessWidget {
                   label: const Text('Delete'),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AccessChoiceTile extends StatelessWidget {
+  final bool selected;
+  final IconData icon;
+  final String label;
+  final String desc;
+  final VoidCallback onTap;
+
+  const _AccessChoiceTile({
+    required this.selected,
+    required this.icon,
+    required this.label,
+    required this.desc,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.primary;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+          border: Border.all(color: selected ? color : Colors.grey.shade300, width: 1.5),
+          borderRadius: BorderRadius.circular(10),
+          color: selected ? color.withOpacity(0.08) : null,
+        ),
+        child: Column(
+          children: [
+            Icon(icon, size: 20, color: selected ? color : Colors.grey.shade600),
+            const SizedBox(height: 4),
+            Text(label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? color : null,
+                )),
+            const SizedBox(height: 2),
+            Text(desc,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 10.5, color: Colors.grey)),
           ],
         ),
       ),
